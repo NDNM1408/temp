@@ -55,8 +55,24 @@ CONTEXTS = [4000, 8000, 9000, 13000, 16000, 20000, 32000, 40000,
 # so the cheap end of the ladder is covered generously.
 BATCHES = [1, 2, 3, 4, 6, 8, 12]
 
+# What the request carries changes which code paths compile, and this was got
+# wrong twice. The scenario sets require_ignore_eos, so every real request has
+# it; without it a junk prompt can emit EOS after a few tokens and the decode
+# batch never actually forms. And the load generator sends no temperature at all
+# -- it only forwards --extra-inputs, which the harness sets to ignore_eos alone
+# -- so the server applies its OpenAI default of 1.0 and samples. Warming at
+# temperature 0 exercises the greedy argmax path instead, which is not the one
+# production uses.
+MODES = {
+    # exactly what the harness sends: ignore_eos, no temperature field
+    "prod":   {"ignore_eos": True},
+    # greedy, in case anything is ever run that way
+    "greedy": {"ignore_eos": True, "temperature": 0.0},
+}
+
 _lock = threading.Lock()
 _fail: list[str] = []
+_extra: dict = dict(MODES["prod"])
 
 
 def junk_groups(groups: int, salt: int) -> str:
@@ -83,7 +99,8 @@ def ask(base: str, prompt: str, max_tokens: int = 8) -> tuple[float, int]:
     body = json.dumps({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens, "temperature": 0.0,
+        "max_tokens": max_tokens,
+        **_extra,
     }).encode()
     req = urllib.request.Request(base + "/v1/chat/completions", data=body,
                                 headers={"Content-Type": "application/json"})
@@ -176,20 +193,26 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--quick", action="store_true", help="context sweep only")
+    ap.add_argument("--modes", nargs="*", default=list(MODES),
+                    help="request shapes to warm: prod, greedy")
     args = ap.parse_args()
 
+    global _extra
     t0 = time.monotonic()
     calibrate(args.base)
-    compiled = phase_contexts(args.base)
-    if not args.quick:
-        phase_batches(args.base)
-        phase_mixed(args.base)
-        residual = phase_confirm(args.base)
-    else:
-        residual = float("nan")
+    compiled = 0.0
+    residual = float("nan")
+    for mode in args.modes:
+        _extra = dict(MODES[mode])
+        print(f"\n######## mode={mode}  extra={_extra}")
+        compiled += phase_contexts(args.base)
+        if not args.quick:
+            phase_batches(args.base)
+            phase_mixed(args.base)
+            residual = phase_confirm(args.base)
 
     print("\n" + "=" * 50)
-    print(f"compile time observed in phase 1 : {compiled/1000:>7.1f} s")
+    print(f"compile time observed in phase 1 : {compiled/1000:>7.1f} s  (all modes)")
     if residual == residual:
         print(f"gap remaining after everything   : {residual:>7.0f} ms")
     print(f"wall clock                       : {(time.monotonic()-t0)/60:>7.1f} min")
