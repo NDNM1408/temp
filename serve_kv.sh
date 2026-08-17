@@ -24,7 +24,10 @@ PORT=${2:-8000}
 ROOT=${ROOT:-/srv/contest-workspace}
 MODEL_DIR=${MODEL_DIR:-$ROOT/models/Qwen3.5-122B-A10B-FP8}
 CACHE_DIR=${CACHE_DIR:-$ROOT/vllm_cache}
-IMAGE=${IMAGE:-vllm/vllm-openai:v0.25.0}
+# The production image, not the published one. It carries xxhash, which
+# --prefix-caching-hash-algo xxhash needs; the stock image does not, and the
+# failure mode is nasty rather than loud (see the readiness check below).
+IMAGE=${IMAGE:-vllm-ftok:v0.25.0}
 NAME=${NAME:-llm-serve}
 MNBT=${MNBT:-8192}
 
@@ -63,17 +66,38 @@ docker run -d --name "$NAME" --gpus all --network host --ipc host \
   --host 0.0.0.0 --port "$PORT" \
   $ARGS || exit 1
 
-echo "launched $NAME dtype=$DTYPE mnbt=$MNBT port=$PORT"
+echo "launched $NAME dtype=$DTYPE mnbt=$MNBT port=$PORT image=$IMAGE"
+
+# /health answering 200 does NOT mean the engine is alive. The API server and the
+# engine core are separate processes: kill the core -- a bad flag is enough -- and
+# the front end keeps serving /health and /metrics while every generation request
+# hangs. That exact shape burned a 15-minute replay against a dead engine, with
+# prompt_tokens_total stuck at zero and the load generator reporting progress the
+# whole time. So readiness means "it generated a token", nothing less.
+ready=0
 for i in $(seq 1 150); do
   if curl -s -m 3 http://127.0.0.1:"$PORT"/health >/dev/null 2>&1; then
-    echo "READY after $((i*10))s"
-    # The pool size is the number this arm trades against, so record it next to
-    # the score rather than leaving it in a log nobody re-reads.
-    docker logs "$NAME" 2>&1 | grep -E "GPU KV cache size|Maximum concurrency|kv_cache_dtype" | head -3
-    exit 0
+    if curl -s -m 60 http://127.0.0.1:"$PORT"/v1/chat/completions \
+         -H 'Content-Type: application/json' \
+         -d '{"model":"Qwen3.5-122B-A10B-FP8","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+         2>/dev/null | grep -q '"choices"'; then
+      ready=1
+      echo "READY after $((i*10))s (generated a token)"
+      break
+    fi
   fi
   docker ps --format '{{.Names}}' | grep -qx "$NAME" || {
     echo "CONTAINER DIED"; docker logs "$NAME" 2>&1 | tail -40; exit 1; }
   sleep 10
 done
-echo "TIMEOUT waiting for /health"; exit 2
+
+if [ "$ready" != "1" ]; then
+  echo "NOT READY: /health may answer but the engine never generated a token"
+  docker logs "$NAME" 2>&1 | grep -iE "error|not found|required|Traceback" | head -10
+  exit 2
+fi
+
+# The pool size is the number this arm trades against, so record it next to the
+# score rather than leaving it in a log nobody re-reads.
+docker logs "$NAME" 2>&1 | grep -E "GPU KV cache size|Maximum concurrency|kv_cache_dtype" | head -3
+exit 0
