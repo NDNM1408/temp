@@ -38,7 +38,16 @@ def metric(rec: dict, name: str):
     return m.get("value") if isinstance(m, dict) else m
 
 
-def load(path: str) -> list[dict]:
+def load(path: str, after: float = 0.0) -> list[dict]:
+    """`after` drops the first N seconds of the run.
+
+    Not cosmetic: a cold engine compiles kernels on the first request that needs
+    each shape, and a single nvcc call costs tens of seconds. Those stalls have
+    nothing to do with either work or contention, and they are large enough to
+    swamp both -- fitting across them produced an R-squared of 0.03 and told us
+    nothing. Anything asking what the steady state does has to start after the
+    compiling stops.
+    """
     if os.path.isdir(path):
         path = os.path.join(path, "profile_export.jsonl")
     out = []
@@ -68,6 +77,9 @@ def load(path: str) -> list[dict]:
             "start": md["request_start_ns"] / 1e6,
             "first": md["request_start_ns"] / 1e6 + float(ttft),
         })
+    if out and after > 0:
+        t0 = min(r["start"] for r in out)
+        out = [r for r in out if r["start"] - t0 >= after * 1000.0]
     return out
 
 
@@ -111,8 +123,8 @@ def pct(v: list[float], q: float) -> float:
     return v[min(len(v) - 1, int(q * len(v)))]
 
 
-def report(path: str) -> None:
-    rs = load(path)
+def report(path: str, after: float = 0.0) -> None:
+    rs = load(path, after)
     name = path.rstrip("/").split("/")[-1]
     if len(rs) < 10:
         print(f"\n=== {name}: only {len(rs)} usable records, not fitting")
@@ -157,5 +169,12 @@ def report(path: str) -> None:
 
 
 if __name__ == "__main__":
-    for p in sys.argv[1:] or ["/srv/contest-workspace/bench/kv_B"]:
-        report(p)
+    args = [a for a in sys.argv[1:] if not a.startswith("--after")]
+    after = 0.0
+    for a in sys.argv[1:]:
+        if a.startswith("--after="):
+            after = float(a.split("=", 1)[1])
+    if after:
+        print(f"(dropping the first {after:.0f}s of each run: kernel compilation)")
+    for p in args or ["/srv/contest-workspace/bench/kv_B"]:
+        report(p, after)
