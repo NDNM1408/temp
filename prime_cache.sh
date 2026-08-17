@@ -36,7 +36,11 @@ stop_server() {
 }
 
 # dtype:budget, production first
-PASSES=${PASSES:-"fp8:16384 fp8:8192 bf16:16384 bf16:8192"}
+# Only the dtype needs its own pass. The cache directory listing showed attention
+# kernels keyed on (kv dtype, head_dim, page_size, head_group_ratio) -- the token
+# budget is not part of the key, so an 8192 pass would mostly re-hit what a 16384
+# pass already wrote. Production's dtype goes first.
+PASSES=${PASSES:-"fp8:16384 bf16:16384"}
 
 {
   echo "=== priming kernel cache at $FI_CACHE   $(date -Is)"
@@ -56,7 +60,11 @@ PASSES=${PASSES:-"fp8:16384 fp8:8192 bf16:16384 bf16:8192"}
     docker logs llm-serve 2>&1 | grep -icE "JIT compilation during inference" || true
     docker logs llm-serve 2>&1 | grep -oE "JIT compilation during inference: [a-z_]+" \
       | sort -u | sed 's/^/    /'
-    echo "--- cache size now: $(du -sh "$FI_CACHE" 2>/dev/null | cut -f1)"
+      echo "--- caches now:"
+    for d in "$FI_CACHE" "${TRITON_CACHE:-$ROOT/triton_cache}" \
+             "${INDUCTOR_CACHE:-$ROOT/inductor_cache}" "${HUMMING_CACHE:-$ROOT/humming_cache}"; do
+      echo "      $(du -sh "$d" 2>/dev/null | cut -f1)  $(basename "$d")  ($(find "$d" -type f 2>/dev/null | wc -l) files)"
+    done
   done
 
   echo
@@ -72,7 +80,12 @@ PASSES=${PASSES:-"fp8:16384 fp8:8192 bf16:16384 bf16:8192"}
   docker logs llm-serve 2>&1 | grep -iE "JIT-compiled|first run may take" | head -3
 
   echo
-  echo "=== final cache: $(du -sh "$FI_CACHE" | cut -f1)   $(date -Is)"
+  echo "=== final caches:"
+  for d in "$FI_CACHE" "${TRITON_CACHE:-$ROOT/triton_cache}" \
+           "${INDUCTOR_CACHE:-$ROOT/inductor_cache}" "${HUMMING_CACHE:-$ROOT/humming_cache}"; do
+    echo "    $(du -sh "$d" 2>/dev/null | cut -f1)  $(basename "$d")  ($(find "$d" -type f 2>/dev/null | wc -l) files)"
+  done
+  echo "   $(date -Is)"
   echo "=== done"
 } > "$LOG" 2>&1
 echo "PRIME_CACHE_DONE"

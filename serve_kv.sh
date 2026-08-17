@@ -37,6 +37,15 @@ MNBT=${MNBT:-8192}
 # rather than one-time per boot. fp8 and bf16 kernels are keyed separately and
 # coexist in the same directory, so one cache serves both configurations.
 FI_CACHE=${FI_CACHE:-$ROOT/flashinfer_cache}
+# FlashInfer is not the only compiler in here, and it turned out not to be the
+# expensive one. Triton caches kernels under ~/.triton, TorchInductor writes its
+# generated Triton launchers to /tmp/torchinductor_<user>, and the Humming MoE
+# backend builds a launcher of its own -- all three defaulted to paths that die
+# with the container, so each restart recompiled them. Found by listing what the
+# container had actually written after a warm-up, rather than by guessing.
+TRITON_CACHE=${TRITON_CACHE:-$ROOT/triton_cache}
+INDUCTOR_CACHE=${INDUCTOR_CACHE:-$ROOT/inductor_cache}
+HUMMING_CACHE=${HUMMING_CACHE:-$ROOT/humming_cache}
 
 case "$DTYPE" in
   fp8)  KV_FLAG="--kv-cache-dtype fp8" ;;
@@ -55,7 +64,7 @@ ARGS="--max-model-len 262144 \
  --max-cudagraph-capture-size 128 --trust-remote-code \
  --enable-prompt-tokens-details"
 
-mkdir -p "$CACHE_DIR" "$FI_CACHE"
+mkdir -p "$CACHE_DIR" "$FI_CACHE" "$TRITON_CACHE" "$INDUCTOR_CACHE" "$HUMMING_CACHE"
 # A restart policy on an earlier container races with removal: the daemon brings
 # it back between the kill and the remove, and the next `docker run` then fails
 # on a name conflict.
@@ -69,7 +78,12 @@ docker run -d --name "$NAME" --gpus all --network host --ipc host \
   -v "$CACHE_DIR":/root/.cache/vllm \
   -e VLLM_LOGGING_LEVEL=INFO \
   -e FLASHINFER_CACHE_DIR=/root/.cache/flashinfer \
+  -e TRITON_CACHE_DIR=/root/.cache/triton \
+  -e TORCHINDUCTOR_CACHE_DIR=/root/.cache/inductor \
   -v "$FI_CACHE":/root/.cache/flashinfer \
+  -v "$TRITON_CACHE":/root/.cache/triton \
+  -v "$INDUCTOR_CACHE":/root/.cache/inductor \
+  -v "$HUMMING_CACHE":/root/.humming \
   ${MAX_JOBS:+-e MAX_JOBS=$MAX_JOBS} ${NVCC_THREADS:+-e NVCC_THREADS=$NVCC_THREADS} \
   "$IMAGE" \
   --model /model --served-model-name Qwen3.5-122B-A10B-FP8 \

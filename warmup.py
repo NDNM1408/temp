@@ -38,10 +38,12 @@ import urllib.error
 import urllib.request
 
 MODEL = "Qwen3.5-122B-A10B-FP8"
-# Digit groups tokenise at roughly eight tokens per group for this tokenizer.
-# Assuming one token per group asked for a 560k-token prompt, which the server
-# rejected, and took the rest of the warm-up down with it.
-TOKENS_PER_GROUP = 8.0
+# How many tokens a digit group costs is not a constant -- the numbers grow from
+# one digit to five -- and guessing it wrong is how earlier versions of this file
+# both overshot the model's context limit and, after over-correcting, topped out
+# at 139k when the sweep was supposed to reach 200k. So it is measured against
+# the server's own token count once, at startup, and used from there.
+TOKENS_PER_GROUP = 4.0
 
 # Spread across the range the replay visits, and deliberately not all multiples
 # of the 8192/16384 token budget: the remainder decides the last chunk's shape.
@@ -57,9 +59,23 @@ _lock = threading.Lock()
 _fail: list[str] = []
 
 
+def junk_groups(groups: int, salt: int) -> str:
+    return f"{salt} " + " ".join(str(i % 100000) for i in range(max(1, groups)))
+
+
 def junk(target_tokens: int, salt: int) -> str:
-    groups = max(1, int(target_tokens / TOKENS_PER_GROUP))
-    return f"{salt} " + " ".join(str(i % 100000) for i in range(groups))
+    return junk_groups(int(target_tokens / TOKENS_PER_GROUP), salt)
+
+
+def calibrate(base: str) -> None:
+    """Ask the server what a known number of groups actually tokenises to."""
+    global TOKENS_PER_GROUP
+    probe = 4000
+    _, tok = ask(base, junk_groups(probe, 99), max_tokens=1)
+    if tok > 0:
+        TOKENS_PER_GROUP = tok / probe
+    print(f"calibration: {TOKENS_PER_GROUP:.2f} tokens per digit group "
+          f"({probe} groups -> {tok} tokens)")
 
 
 def ask(base: str, prompt: str, max_tokens: int = 8) -> tuple[float, int]:
@@ -163,6 +179,7 @@ def main() -> None:
     args = ap.parse_args()
 
     t0 = time.monotonic()
+    calibrate(args.base)
     compiled = phase_contexts(args.base)
     if not args.quick:
         phase_batches(args.base)
