@@ -30,6 +30,13 @@ CACHE_DIR=${CACHE_DIR:-$ROOT/vllm_cache}
 IMAGE=${IMAGE:-vllm-ftok:v0.25.0}
 NAME=${NAME:-llm-serve}
 MNBT=${MNBT:-8192}
+# Compiled kernels live here. The default is a temp path inside the container,
+# which means every restart throws the whole cache away and re-pays nvcc for
+# every shape -- measured at 28.8 s for a single one, and 8 points of score over
+# the first 600 s of a run. Mounting it makes the cost one-time for the machine
+# rather than one-time per boot. fp8 and bf16 kernels are keyed separately and
+# coexist in the same directory, so one cache serves both configurations.
+FI_CACHE=${FI_CACHE:-$ROOT/flashinfer_cache}
 
 case "$DTYPE" in
   fp8)  KV_FLAG="--kv-cache-dtype fp8" ;;
@@ -48,7 +55,7 @@ ARGS="--max-model-len 262144 \
  --max-cudagraph-capture-size 128 --trust-remote-code \
  --enable-prompt-tokens-details"
 
-mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR" "$FI_CACHE"
 # A restart policy on an earlier container races with removal: the daemon brings
 # it back between the kill and the remove, and the next `docker run` then fails
 # on a name conflict.
@@ -61,6 +68,9 @@ docker run -d --name "$NAME" --gpus all --network host --ipc host \
   -v "$MODEL_DIR":/model:ro \
   -v "$CACHE_DIR":/root/.cache/vllm \
   -e VLLM_LOGGING_LEVEL=INFO \
+  -e FLASHINFER_CACHE_DIR=/root/.cache/flashinfer \
+  -v "$FI_CACHE":/root/.cache/flashinfer \
+  ${MAX_JOBS:+-e MAX_JOBS=$MAX_JOBS} ${NVCC_THREADS:+-e NVCC_THREADS=$NVCC_THREADS} \
   "$IMAGE" \
   --model /model --served-model-name Qwen3.5-122B-A10B-FP8 \
   --host 0.0.0.0 --port "$PORT" \
