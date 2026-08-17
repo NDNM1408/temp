@@ -77,7 +77,6 @@ docker run -d --name "$NAME" --gpus all --network host --ipc host \
   -v "$MODEL_DIR":/model:ro \
   -v "$CACHE_DIR":/root/.cache/vllm \
   -e VLLM_LOGGING_LEVEL=INFO \
-  -e VLLM_SERVER_DEV_MODE=1 \
   -e FLASHINFER_CACHE_DIR=/root/.cache/flashinfer \
   -e TRITON_CACHE_DIR=/root/.cache/triton \
   -e TORCHINDUCTOR_CACHE_DIR=/root/.cache/inductor \
